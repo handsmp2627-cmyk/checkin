@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0f6b5c">
 <title>SMP Field Check-in</title>
-<!-- v4 · 21 Oct 2026 -->
+<!-- v4.1 · 22 Oct 2026 -->
 <style>
 :root{--bg:#f3f6f2;--card:#ffffff;--ink:#17231d;--muted:#5b6a61;--line:#d6ddd5;--accent:#0f6b5c;--dark:#17231d;
   --ok:#dcefe2;--warn:#f5e8cf;--bad:#f6dcd9;--bad-ink:#b3261e}
@@ -86,7 +86,7 @@ const FP_READY = (async () => {
 /* Android apps that open links inside themselves often forget everything each time. */
 const IN_APP = /; wv\)|GSA\/|FBAN|FBAV|Instagram|WhatsApp|Line\//.test(navigator.userAgent || '') && /Android/.test(navigator.userAgent || '');
 const CHROME_LINK = 'intent://' + location.host + location.pathname + location.search + '#Intent;scheme=https;package=com.android.chrome;end';
-const TOKEN = deviceToken();
+let TOKEN = deviceToken();
 let state = { school: null, staff: store.get('smp_staff', null), open: null };
 
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -95,6 +95,8 @@ const dist = m => m === '' || m == null ? '—' : (m >= 1000 ? (m / 1000).toFixe
 
 /* ---------- network ---------- */
 async function apiGet(q) {
+  await FP_READY;
+  q = Object.assign({ fp: JSON.stringify(FP) }, q);
   const r = await fetch(API + '?' + new URLSearchParams(q), { redirect: 'follow' });
   return r.json();
 }
@@ -201,10 +203,23 @@ function viewMain() {
   }
   shell(`<div class="school">${esc(s ? s.name : SCHOOL)}</div>
     <div class="who">${esc(st.name)} <span class="sid">· ${esc(st.id)}</span></div>
+    ${st.auto ? notMeLink() : ''}
     ${state.open ? `<div class="card">دخلت الساعة <b dir="ltr">${hhmm(state.open.checkIn)}</b><span class="en">Checked in at ${hhmm(state.open.checkIn)}</span></div>` : ''}
     ${state.elsewhere ? `<div class="res bad"><div>لم تسجّل خروجك من <b>${esc(state.elsewhere.school)}</b> (دخول ${hhmm(state.elsewhere.checkIn)}). ستُسجّل تلك الزيارة بدون خروج.<span class="en">You did not check out of ${esc(state.elsewhere.school)} (in at ${hhmm(state.elsewhere.checkIn)}). That visit will be recorded as missing its check-out. Always scan when you leave.</span></div></div>` : ''}
     ${!online ? `<div class="card">لا يوجد إنترنت. سيُحفظ التسجيل ويُرسل لاحقًا.<span class="en">No signal. Your scan will be saved and sent later.</span></div>` : ''}
     <div class="actions">${buttons}</div>`);
+}
+
+/* Shown when the phone was recognised without a PIN, in case it picked the wrong person. */
+function notMeLink() {
+  return `<button class="btn ghost" style="text-align:start;padding:0" onclick="notMe()">لست ${esc(state.staff.name)}؟ اضغط هنا · Not ${esc(state.staff.name)}? Tap here</button>`;
+}
+async function notMe() {
+  viewLoading('…');
+  try { await apiPost({ action: 'notme', token: TOKEN }); } catch (e) {}
+  TOKEN = 'dv-' + uid(); store.set('smp_token', TOKEN); cookieSet('smp_token', TOKEN);
+  store.set('smp_staff', null); state.staff = null; state.open = null; state.elsewhere = null;
+  viewRegister();
 }
 
 function viewResult(r, fix) {
@@ -220,7 +235,8 @@ function viewResult(r, fix) {
     <dt>Time</dt><dd>${hhmm(r.time)}</dd>
     ${r.minutes != null ? `<dt>On site</dt><dd>${r.minutes} min</dd>` : ''}
     <dt>Distance</dt><dd>${dist(r.distance)}</dd>
-    <dt>Accuracy</dt><dd>±${Math.round(fix.coords.accuracy)} m</dd></dl>`);
+    <dt>Accuracy</dt><dd>±${Math.round(fix.coords.accuracy)} m</dd></dl>
+    ${state.staff && state.staff.auto ? notMeLink() : ''}`);
 }
 
 /* ---------- actions ---------- */
