@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0f6b5c">
 <title>SMP Field Check-in</title>
+<!-- v4 · 21 Oct 2026 -->
 <style>
 :root{--bg:#f3f6f2;--card:#ffffff;--ink:#17231d;--muted:#5b6a61;--line:#d6ddd5;--accent:#0f6b5c;--dark:#17231d;
   --ok:#dcefe2;--warn:#f5e8cf;--bad:#f6dcd9;--bad-ink:#b3261e}
@@ -22,6 +23,7 @@ main{max-width:460px;margin:0 auto;padding:max(16px,env(safe-area-inset-top)) 16
 .btn.out{background:var(--dark)}
 .btn.ghost{background:transparent;color:var(--accent);font-size:15px;padding:10px}
 .btn:disabled{opacity:.55}
+a.btn{display:block;text-align:center;text-decoration:none}
 .btn:focus-visible,input:focus-visible{outline:3px solid #7cc4b5;outline-offset:2px}
 .actions{margin-top:auto;display:flex;flex-direction:column;gap:10px}
 label{display:flex;flex-direction:column;gap:4px;font-size:14px;color:var(--muted)}
@@ -54,14 +56,36 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
 };
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
+function cookieGet(k) { try { const m = document.cookie.match(new RegExp('(?:^|; )' + k + '=([^;]*)')); return m ? decodeURIComponent(m[1]) : null; } catch (e) { return null; } }
+function cookieSet(k, v) { try { document.cookie = k + '=' + encodeURIComponent(v) + '; max-age=34560000; path=/; SameSite=Lax; Secure'; } catch (e) {} }
+/* The browser's ID is kept in two places, so clearing one does not lose it. */
 function deviceToken() {
-  let t = store.get('smp_token', null);
-  if (!t) {
-    t = 'dv-' + (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
-    store.set('smp_token', t);
-  }
+  let t = store.get('smp_token', null) || cookieGet('smp_token');
+  if (!t) t = 'dv-' + uid();
+  store.set('smp_token', t); cookieSet('smp_token', t);
   return t;
 }
+/* Which phone this is (system, model, screen): the same phone is recognised even in another browser. */
+const FP = (() => {
+  const ua = navigator.userAgent || '';
+  const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac/.test(ua) ? 'Mac' : 'Other';
+  let model = '';
+  const m = ua.match(/Android [\d.]+;\s*([^;)]+?)(?:\s+Build\/[^;)]*)?[;)]/);
+  if (m && m[1] && m[1] !== 'K') model = m[1].trim();
+  return { os, model, w: screen.width, h: screen.height, dpr: Math.round((window.devicePixelRatio || 1) * 100) / 100 };
+})();
+const FP_READY = (async () => {
+  try {
+    if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
+      const h = await navigator.userAgentData.getHighEntropyValues(['model']);
+      if (h && h.model) FP.model = h.model.trim();
+    }
+  } catch (e) {}
+})();
+/* Android apps that open links inside themselves often forget everything each time. */
+const IN_APP = /; wv\)|GSA\/|FBAN|FBAV|Instagram|WhatsApp|Line\//.test(navigator.userAgent || '') && /Android/.test(navigator.userAgent || '');
+const CHROME_LINK = 'intent://' + location.host + location.pathname + location.search + '#Intent;scheme=https;package=com.android.chrome;end';
 const TOKEN = deviceToken();
 let state = { school: null, staff: store.get('smp_staff', null), open: null };
 
@@ -86,6 +110,7 @@ async function flushQueue() {
   const q = queued(); if (!q.length || !navigator.onLine) return;
   const left = [];
   for (const item of q) {
+    if (!item.scanId) item.scanId = uid();
     try { const r = await apiPost(item); if (!r.ok && r.error === 'server_error') left.push(item); }
     catch (e) { left.push(item); }
   }
@@ -131,23 +156,28 @@ function viewRegister(err) {
                     : `<div class="school">${esc(state.school ? state.school.name : SCHOOL)}</div>`;
   shell(`${title}
   <div class="card">
-    <div>أدخل الرمز الشخصي الذي استلمته. تقوم بذلك مرة واحدة فقط.<span class="en">Enter the personal PIN you received. You only do this once.</span></div>
-    <label for="pin">الرمز الشخصي · PIN<input id="pin" inputmode="numeric" autocomplete="off" maxlength="6"></label>
+    <div>لم يتعرّف هذا المتصفح عليك. أدخل رمزك الشخصي للمتابعة.<span class="en">This browser does not recognise you. Enter your personal PIN to continue.</span></div>
+    <label for="pin">رمز SMP Tracker · Your SMP Tracker PIN<input id="pin" inputmode="numeric" autocomplete="off" maxlength="6"></label>
     ${err ? `<p class="err">${err}</p>` : ''}
   </div>
-  <div class="actions"><button class="btn" id="next">التالي · Next</button></div>`);
-  document.getElementById('next').onclick = checkPin;
+  <div class="actions"><button class="btn" id="next">التالي · Next</button>${inAppHint()}</div>`);
+  document.getElementById('next').onclick = () => checkPin();
 }
 
-function viewConfirm(st, pin, err) {
+function inAppHint() {
+  return IN_APP ? `<a class="btn ghost" href="${CHROME_LINK}">افتح في Chrome ليتذكّرك · Open in Chrome so it remembers you</a>` : '';
+}
+
+function viewConfirm(st, pin, err, needPhone) {
+  if (needPhone === undefined) needPhone = st.needPhone;
   shell(`<div class="school">${esc(st.name)}</div>
   <div class="who">${esc(st.role || '')} <span class="sid">· ${esc(st.id)}</span></div>
   <div class="card">
-    <div>هل هذا أنت؟ أدخل رقم هاتفك ثم سجّل.<span class="en">Is this you? Enter your phone number, then register.</span></div>
-    <label for="phone">رقم الهاتف · Phone number<input id="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="70 123 456"></label>
+    <div>أدخل رقم هاتفك للمرة الأولى.<span class="en">Enter your phone number (first time only).</span></div>
+    ${needPhone ? `<label for="phone">رقم الهاتف · Phone number<input id="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="70 123 456"></label>` : ''}
     ${err ? `<p class="err">${err}</p>` : ''}
   </div>
-  <div class="actions"><button class="btn" id="reg">تسجيل هذا الهاتف · Register this phone</button>
+  <div class="actions"><button class="btn" id="reg">متابعة · Continue</button>
   <button class="btn ghost" onclick="viewRegister()">ليس أنا · Not me</button></div>`);
   document.getElementById('reg').onclick = () => register(st, pin);
 }
@@ -172,6 +202,7 @@ function viewMain() {
   shell(`<div class="school">${esc(s ? s.name : SCHOOL)}</div>
     <div class="who">${esc(st.name)} <span class="sid">· ${esc(st.id)}</span></div>
     ${state.open ? `<div class="card">دخلت الساعة <b dir="ltr">${hhmm(state.open.checkIn)}</b><span class="en">Checked in at ${hhmm(state.open.checkIn)}</span></div>` : ''}
+    ${state.elsewhere ? `<div class="res bad"><div>لم تسجّل خروجك من <b>${esc(state.elsewhere.school)}</b> (دخول ${hhmm(state.elsewhere.checkIn)}). ستُسجّل تلك الزيارة بدون خروج.<span class="en">You did not check out of ${esc(state.elsewhere.school)} (in at ${hhmm(state.elsewhere.checkIn)}). That visit will be recorded as missing its check-out. Always scan when you leave.</span></div></div>` : ''}
     ${!online ? `<div class="card">لا يوجد إنترنت. سيُحفظ التسجيل ويُرسل لاحقًا.<span class="en">No signal. Your scan will be saved and sent later.</span></div>` : ''}
     <div class="actions">${buttons}</div>`);
 }
@@ -183,7 +214,7 @@ function viewResult(r, fix) {
   const note = r.outside
     ? `أنت على بعد ${dist(r.distance)} من المدرسة. سيراجع المشرف هذه الزيارة.<span class="en">You are ${dist(r.distance)} from the school. This visit will be reviewed.</span>`
     : r.weak ? `إشارة الموقع ضعيفة. قف في الخارج في المرة القادمة.<span class="en">Weak location signal. Stand outside next time.</span>`
-    : isIn ? `امسح الرمز مجددًا عند المغادرة.<span class="en">Scan again when you leave.</span>` : `شكرًا.<span class="en">Thank you.</span>`;
+    : isIn ? `<b>تسجيل الخروج إلزامي:</b> امسح الرمز مجددًا عند المغادرة.<span class="en"><b>Check-out is required:</b> scan again when you leave.</span>` : `شكرًا.<span class="en">Thank you.</span>`;
   shell(`<div class="res ${cls}"><h2>${title}</h2><div>${note}</div></div>
     <dl><dt>School</dt><dd>${esc(state.school ? state.school.id : SCHOOL)}</dd>
     <dt>Time</dt><dd>${hhmm(r.time)}</dd>
@@ -200,23 +231,37 @@ const REG_ERRORS = {
   busy: 'الخادم مشغول، حاول بعد لحظات · Server busy, try again in a moment.',
 };
 
-async function checkPin() {
-  const pin = document.getElementById('pin').value.trim();
+function viewChoose(pin, options) {
+  shell(`<div class="card"><div>اختر اسمك.<span class="en">Choose your name.</span></div></div>
+  <div class="actions">${options.map(o => `<button class="btn" data-id="${esc(o.id)}">${esc(o.name)}</button>`).join('')}
+  <button class="btn ghost" onclick="viewRegister()">رجوع · Back</button></div>`);
+  $app.querySelectorAll('button[data-id]').forEach(b => { b.onclick = () => checkPin(pin, b.getAttribute('data-id')); });
+}
+
+async function checkPin(pinArg, staffId) {
+  const pin = typeof pinArg === 'string' ? pinArg : document.getElementById('pin').value.trim();
   if (!pin) return viewRegister('أدخل الرمز · Enter your PIN.');
   viewLoading('جارٍ التحقق… · Checking…');
   try {
-    const r = await apiPost({ action: 'register', pin, token: TOKEN });
-    if (r.ok && r.step === 'confirm') return viewConfirm(r.staff, pin);
+    const r = await apiPost({ action: 'register', pin, staffId: staffId || null, token: TOKEN });
+    if (r.ok && r.step === 'choose') return viewChoose(pin, r.options);
+    if (r.ok && r.step === 'confirm') {
+      r.staff.needPhone = !!r.needPhone;
+      r.staff.pickedId = staffId || null;
+      return r.needPhone ? viewConfirm(r.staff, pin) : register(r.staff, pin);
+    }
     viewRegister(REG_ERRORS[r.error] || 'حدث خطأ · Something went wrong.');
   } catch (e) { viewRegister('لا يوجد إنترنت · No connection. Registration needs signal.'); }
 }
 
 async function register(st, pin) {
-  const phone = document.getElementById('phone').value.trim();
-  if (phone.replace(/\D/g, '').length < 7) return viewConfirm(st, pin, REG_ERRORS.bad_phone);
+  const el = document.getElementById('phone');
+  const phone = el ? el.value.trim() : '';
+  if (st.needPhone && phone.replace(/\D/g, '').length < 7) return viewConfirm(st, pin, REG_ERRORS.bad_phone);
   viewLoading('جارٍ التسجيل… · Registering…');
   try {
-    const r = await apiPost({ action: 'register', pin, phone, confirm: true, token: TOKEN });
+    await FP_READY;
+    const r = await apiPost({ action: 'register', pin, phone, confirm: true, staffId: st.pickedId || st.id, token: TOKEN, fp: FP });
     if (r.ok) {
       state.staff = r.staff; store.set('smp_staff', r.staff);
       return REG ? viewRegistered(r.staff) : start();
@@ -238,13 +283,15 @@ async function scan(kind) {
       ? 'اسمح للمتصفح باستخدام الموقع من الإعدادات ثم حاول مجددًا.<span class="en">Allow location for this page in your browser settings, then try again.</span>'
       : 'فعّل الموقع (GPS) وقف في الخارج ثم حاول مجددًا.<span class="en">Turn on location (GPS), step outside, and try again.</span>');
   }
+  await FP_READY;
   const body = { action: 'scan', token: TOKEN, school: SCHOOL, lat: fix.coords.latitude, lng: fix.coords.longitude,
-                 acc: fix.coords.accuracy, phoneTime: Date.now(), kind: kind || null };
+                 acc: fix.coords.accuracy, phoneTime: Date.now(), kind: kind || null, scanId: uid(), fp: FP };
   if (!navigator.onLine || state.offline) return saveOffline(body, fix);
   try {
     const r = await apiPost(body);
     if (!r.ok) {
       if (r.error === 'not_registered') { store.set('smp_staff', null); state.staff = null; return viewRegister(); }
+      if (r.error === 'busy') return saveOffline(body, fix);
       if (r.error === 'pending') return viewMessage('warn', 'بانتظار الموافقة · Waiting for approval', 'The supervisor has not approved this phone yet.');
       return viewMessage('bad', 'لم يُسجّل · Not recorded', 'حدث خطأ. حاول مجددًا.<span class="en">Something went wrong. Try again.</span>');
     }
@@ -281,7 +328,7 @@ async function start() {
   try {
     const r = await apiGet({ action: 'status', token: TOKEN, school: SCHOOL });
     if (!r.ok && r.error === 'unknown_school') return viewMessage('bad', 'رمز غير معروف · Unknown QR', 'This QR code is not in the school list.');
-    state.school = r.school; state.open = r.open || null;
+    state.school = r.school; state.open = r.open || null; state.elsewhere = r.elsewhere || null;
     if (r.staff) { state.staff = r.staff; store.set('smp_staff', r.staff); return viewMain(); }
     store.set('smp_staff', null); state.staff = null;
     if (r.pending) return viewMessage('warn', 'بانتظار الموافقة · Waiting for approval', 'The supervisor has not approved this phone yet.');
