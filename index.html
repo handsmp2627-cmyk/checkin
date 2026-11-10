@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0f6b5c">
 <title>SMP Field Check-in</title>
-<!-- v4.2 · 26 Oct 2026 -->
+<!-- v4.3 · 10 Nov 2026 -->
 <style>
 :root{--bg:#f3f6f2;--card:#ffffff;--ink:#17231d;--muted:#5b6a61;--line:#d6ddd5;--accent:#0f6b5c;--dark:#17231d;
   --ok:#dcefe2;--warn:#f5e8cf;--bad:#f6dcd9;--bad-ink:#b3261e}
@@ -87,6 +87,20 @@ const FP_READY = (async () => {
 const IN_APP = /; wv\)|GSA\/|FBAN|FBAV|Instagram|WhatsApp|Line\//.test(navigator.userAgent || '') && /Android/.test(navigator.userAgent || '');
 const CHROME_LINK = 'intent://' + location.host + location.pathname + location.search + '#Intent;scheme=https;package=com.android.chrome;end';
 let TOKEN = deviceToken();
+/* A page opened more than STALE_MIN ago must be scanned again: an old tab (e.g. yesterday's school) must not record a visit at the wrong school. */
+const LOADED_AT = Date.now();
+const STALE_MIN = 10;
+function isStale() { return Date.now() - LOADED_AT > STALE_MIN * 60000 && navigator.onLine && !state.offline; }
+function viewStale() {
+  const at = new Date(LOADED_AT).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  shell(`<div class="res warn"><h2>امسح رمز المدرسة مجددًا · Scan the school QR again</h2>
+    <div>هذه الصفحة مفتوحة منذ <b dir="ltr">${at}</b> (${esc(SCHOOL)}). امسح رمز QR الموجود في المدرسة التي أنت فيها الآن.
+    <span class="en">This page was opened on ${at} for ${esc(SCHOOL)}. Scan the QR code at the school you are at now.</span></div></div>`);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && isStale() && document.querySelector('button[onclick^="scan("]')) viewStale();
+});
+window.addEventListener('pageshow', e => { if (e.persisted && isStale()) viewStale(); });
 let state = { school: null, staff: store.get('smp_staff', null), open: null };
 
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -251,7 +265,10 @@ function viewResult(r, fix) {
   const cls = r.outside ? 'bad' : r.weak ? 'warn' : 'ok';
   const isIn = r.kind === 'in';
   const title = isIn ? 'تم تسجيل الدخول · Checked in' : 'تم تسجيل الخروج · Checked out';
-  const note = r.outside
+  const note = r.early
+    ? `سبق أن سجّلت الدخول الساعة ${hhmm(r.time)}. امسح الرمز مجددًا عند المغادرة.<span class="en">You already checked in at ${hhmm(r.time)}. Scan again when you leave.</span>`
+    : r.recent ? `سبق أن سجّلت الخروج الساعة ${hhmm(r.time)}.<span class="en">You already checked out at ${hhmm(r.time)}.</span>`
+    : r.outside
     ? `أنت على بعد ${dist(r.distance)} من المدرسة. سيراجع المشرف هذه الزيارة.<span class="en">You are ${dist(r.distance)} from the school. This visit will be reviewed.</span>`
     : r.weak ? `إشارة الموقع ضعيفة. قف في الخارج في المرة القادمة.<span class="en">Weak location signal. Stand outside next time.</span>`
     : isIn ? `<b>تسجيل الخروج إلزامي:</b> امسح الرمز مجددًا عند المغادرة.<span class="en"><b>Check-out is required:</b> scan again when you leave.</span>` : `شكرًا.<span class="en">Thank you.</span>`;
@@ -316,6 +333,7 @@ async function register(st, pin) {
 }
 
 async function scan(kind) {
+  if (isStale()) return viewStale();
   viewLoading('جارٍ تحديد الموقع… · Getting your location…');
   let fix;
   try { fix = await getFix(); }
@@ -405,6 +423,8 @@ async function start() {
     return viewMessage('bad', 'لا يوجد إنترنت · No connection', 'التسجيل الأول يحتاج إلى إنترنت.<span class="en">The first registration needs signal.</span>');
   }
 }
+// the school stays in memory only: a reloaded or restored old tab asks for a fresh QR scan
+try { if (SCHOOL) history.replaceState(null, '', location.pathname); } catch (e) {}
 start();
 </script>
 </body>
